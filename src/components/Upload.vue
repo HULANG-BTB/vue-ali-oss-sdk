@@ -10,7 +10,6 @@
       :on-remove="handleRemove"
       :file-list="fileList"
       :auto-upload="false"
-      :data="authData"
       :before-upload="handleBeforeUpload"
       :http-request="handleUploadFile"
     >
@@ -27,7 +26,19 @@
             size="small"
             type="success"
             @click="submitUpload"
-          >上传到服务器</el-button>
+          >上传</el-button>
+          <el-button
+            style="margin-left: 10px;"
+            size="small"
+            type="danger"
+            @click="handleUploadStop"
+          >暂停</el-button>
+          <el-button
+            style="margin-left: 10px;"
+            size="small"
+            type="info"
+            @click="handleUploadResume"
+          >继续</el-button>
         </el-row>
       </div>
     </el-upload>
@@ -35,83 +46,121 @@
 </template>
 
 <script>
+import OSS from 'ali-oss';
+
 export default {
   data() {
     return {
       fileList: [],
       action: "",
-      authData: {}
+      authData: {},
+      ossClient: null,
+      upload: {}
     };
   },
   methods: {
-    submitUpload() {
+    async submitUpload() {
+      await this.initOssClient()
       this.$refs.upload.submit();
     },
     handleRemove(file, fileList) {
-      console.log("rm");
-      console.log(file, fileList);
+      console.log("rm", file, fileList);
     },
     handlePreview(file) {
-      console.log(file);
+      console.log("prev:",file);
     },
     async handleBeforeUpload(file) {
-      const auth = await this.$axios.get("/api/AliOSS");
+      // 数据库 标记开始上传 
       const upload = await this.$axios.post("/api/AliOSS/upload", {
         filename: file.name,
         uploadTime: new Date(),
         status: "uploading"
       });
-      console.log(auth);
-      console.log(upload);
-      this.$set(this.authData, `${file.uid}`, {
-        host: auth.data.data.host,
-        auth: {
-          name: `${file.name}`,
-          key: `${auth.data.data.dir}\${filename}`,
-          policy: `${auth.data.data.policy}`,
-          OSSAccessKeyId: `${auth.data.data.accessid}`,
-          success_action_status: 200,
-          signature: `${auth.data.data.signature}`
-        },
-        upload: upload.data.data
-      });
+      this.$set(this.upload, `${file.uid}`, upload.data.data);
     },
-    handleUploadFile(param) {
-      let config = {
-        //添加请求头
-        headers: { "Content-Type": "multipart/form-data" },
-        //添加上传进度监听事件
-        onUploadProgress: e => {
-          var completeProgress = (((e.loaded / e.total) * 100) | 0) + "%";
-          e.percent = completeProgress;
-          this.$refs.upload.handleProgress(e, param.file);
-        }
-      };
-      let formData = new FormData();
-      for (let key in this.authData[`${param.file.uid}`].auth) {
-        formData.append(key, this.authData[`${param.file.uid}`].auth[key]);
-      }
-      formData.append("file", param.file);
-      this.$axios
-        .post(`${this.authData[`${param.file.uid}`].host}`, formData, config)
-        .then(res => {
-          this.$refs.upload.handleSuccess(res, param.file);
-          this.handleUploadSuccess(param.file);
-        })
-        .catch(error => {
-          this.$refs.upload.handleError(error, param.file);
-          this.handleUploadError(param.file);
-        });
+    async handleUploadFile(param) {
+      // 单片上传
+      // this.singlePartUpload(param.file)
+
+      // 分片上传
+      this.multiPartUpload(param.file)
+      
+      // this.$axios
+      //   .post(`${this.authData[`${param.file.uid}`].host}`, formData, config)
+      //   .then(res => {
+      //     this.$refs.upload.handleSuccess(res, param.file);
+      //     this.handleUploadSuccess(param.file);
+      //   })
+      //   .catch(error => {
+      //     this.$refs.upload.handleError(error, param.file);
+      //     this.handleUploadError(param.file);
+      //   });
     },
     handleUploadSuccess(file) {
-      this.authData[`${file.uid}`].upload.status = "upload finished";
-      this.$axios.put("/api/AliOSS/upload", this.authData[`${file.uid}`].upload);
+      this.upload[`${file.uid}`].status = "upload finished";
+      this.$axios.put("/api/AliOSS/upload", this.upload[`${file.uid}`]);
     },
     handleUploadError(file) {
-      this.authData[`${file.uid}`].upload.status = "upload error";
-      this.$axios.put("/api/AliOSS/upload", this.authData[`${file.uid}`].upload);
+      this.upload[`${file.uid}`].status = "upload error";
+      this.$axios.put("/api/AliOSS/upload", this.upload[`${file.uid}`]);
     },
-    handleUploadProgress() {}
+    handleUploadProgress(progress, checkpoint) {
+      // this.$refs.upload
+      console.log(`${checkpoint.file.name} ---> ${progress * 100}`)
+      console.log(checkpoint)
+      this.$refs.upload.onProgress(progress * 100, checkpoint.file)
+    },
+    handleUploadStop() {
+      if (this.ossClient) {
+        this.ossClient.cancle()
+      }
+    },
+    handleUploadResume() {
+
+    },
+    async initOssClient() {
+      // 初始化 OSS客户端
+      const auth = await this.$axios.get("/api/AliOSS/getAliStsToken");
+      this.ossClient = new OSS({
+        accessKeyId: auth.data.data.accrssKeyId,
+        accessKeySecret: auth.data.data.accessKeySecret,
+        bucket: auth.data.data.bucket,
+        region: `oss-${auth.data.data.region}`,
+        stsToken: auth.data.data.securityToken
+      })
+    },
+    async multiPartUpload(file) {
+      console.log(file)
+      if (!this.ossClient) {
+        await this.initOssClient()
+      }
+      const partSize = 1024 * 100; // 片大小
+      const parallel = 3; // 同时上传
+      this.ossClient.multipartUpload(file.name, file, {
+        parallel,
+        partSize,
+        progress: this.handleUploadProgress
+      }).then(res => {
+        console.log(res)
+        this.handleUploadSuccess(file)
+      }).catch(res=> {
+        console.error(res)
+        this.handleUploadError(file)
+      })
+
+    },
+    async singlePartUpload(file) {
+      if (!this.ossClient) {
+        await this.initOssClient()
+      }
+      this.ossClient.put(file.name, file).then(res => {
+        console.log(res)
+        this.handleUploadSuccess(file)
+      }).catch(res => {
+        console.error(res)
+        this.handleUploadError(file)
+      })
+    }
   }
 };
 </script>
