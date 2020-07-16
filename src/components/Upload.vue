@@ -21,12 +21,7 @@
       <div class="el-upload__tip" slot="tip">
         只能上传jpg/png文件，且不超过500kb
         <el-row style="margin-top: 15px">
-          <el-button
-            style="margin-left: 10px;"
-            size="small"
-            type="success"
-            @click="submitUpload"
-          >上传</el-button>
+          <el-button style="margin-left: 10px;" size="small" type="success" @click="submitUpload">上传</el-button>
           <el-button
             style="margin-left: 10px;"
             size="small"
@@ -36,7 +31,7 @@
           <el-button
             style="margin-left: 10px;"
             size="small"
-            type="info"
+            type="primary"
             @click="handleUploadResume"
           >继续</el-button>
         </el-row>
@@ -46,7 +41,7 @@
 </template>
 
 <script>
-import OSS from 'ali-oss';
+import OSS from "ali-oss";
 
 export default {
   data() {
@@ -55,22 +50,28 @@ export default {
       action: "",
       authData: {},
       ossClient: null,
-      upload: {}
+      upload: {},
+      checkpoints: {},
+      multiPartConfig: {
+        parallel: 3,
+        partSize: 1024 * 512,
+        progress: this.handleUploadProgress
+      }
     };
   },
   methods: {
     async submitUpload() {
-      await this.initOssClient()
+      await this.initOssClient();
       this.$refs.upload.submit();
     },
     handleRemove(file, fileList) {
       console.log("rm", file, fileList);
     },
     handlePreview(file) {
-      console.log("prev:",file);
+      console.log("prev:", file);
     },
     async handleBeforeUpload(file) {
-      // 数据库 标记开始上传 
+      // 数据库 标记开始上传
       const upload = await this.$axios.post("/api/AliOSS/upload", {
         filename: file.name,
         uploadTime: new Date(),
@@ -83,8 +84,8 @@ export default {
       // this.singlePartUpload(param.file)
 
       // 分片上传
-      this.multiPartUpload(param.file)
-      
+      this.multiPartUpload(param.file);
+
       // this.$axios
       //   .post(`${this.authData[`${param.file.uid}`].host}`, formData, config)
       //   .then(res => {
@@ -100,23 +101,28 @@ export default {
       this.upload[`${file.uid}`].status = "upload finished";
       this.$axios.put("/api/AliOSS/upload", this.upload[`${file.uid}`]);
     },
-    handleUploadError(file) {
-      this.upload[`${file.uid}`].status = "upload error";
+    handleUploadError(file, msg) {
+      this.upload[`${file.uid}`].status = msg;
       this.$axios.put("/api/AliOSS/upload", this.upload[`${file.uid}`]);
     },
     handleUploadProgress(progress, checkpoint) {
       // this.$refs.upload
-      console.log(`${checkpoint.file.name} ---> ${progress * 100}`)
-      console.log(checkpoint)
-      this.$refs.upload.handleProgress(progress * 100, checkpoint.file)
+      this.$set(this.checkpoints, `${checkpoint.uploadId}`, checkpoint);
+
+      this.$refs.upload.handleProgress(
+        {
+          percent: progress * 100
+        },
+        checkpoint.file
+      );
     },
     handleUploadStop() {
       if (this.ossClient) {
-        this.ossClient.cancle()
+        this.ossClient.cancel();
       }
     },
     handleUploadResume() {
-
+      this.resumeMultiPartUpload()
     },
     async initOssClient() {
       // 初始化 OSS客户端
@@ -127,39 +133,56 @@ export default {
         bucket: auth.data.data.bucket,
         region: `oss-${auth.data.data.region}`,
         stsToken: auth.data.data.securityToken
-      })
+      });
     },
     async multiPartUpload(file) {
-      console.log(file)
       if (!this.ossClient) {
-        await this.initOssClient()
+        await this.initOssClient();
       }
-      const partSize = 1024 * 100; // 片大小
-      const parallel = 3; // 同时上传
-      this.ossClient.multipartUpload(file.name, file, {
-        parallel,
-        partSize,
-        progress: this.handleUploadProgress
-      }).then(res => {
-        console.log(res)
-        this.handleUploadSuccess(file)
-      }).catch(res=> {
-        console.error(res)
-        this.handleUploadError(file)
-      })
-
+      this.ossClient
+        .multipartUpload(file.name, file, {
+          parallel: this.multiPartConfig.parallel,
+          partSize: this.multiPartConfig.partSize,
+          progress: this.multiPartConfig.progress
+        })
+        .then(res => {
+          this.handleUploadSuccess(file, res.name);
+        })
+        .catch(res => {
+          this.handleUploadError(file, res.name);
+        });
     },
     async singlePartUpload(file) {
       if (!this.ossClient) {
-        await this.initOssClient()
+        await this.initOssClient();
       }
-      this.ossClient.put(file.name, file).then(res => {
-        console.log(res)
-        this.handleUploadSuccess(file)
-      }).catch(res => {
-        console.error(res)
-        this.handleUploadError(file)
-      })
+      this.ossClient
+        .put(file.name, file)
+        .then(res => {
+          this.handleUploadSuccess(file, res.name);
+        })
+        .catch(res => {
+          this.handleUploadError(file, res.name);
+        });
+    },
+    async resumeMultiPartUpload() {
+      if (!this.ossClient) {
+        await this.initOssClient();
+      }
+      Object.values(this.checkpoints).forEach(checkpoint => {
+        const { uploadId, file } = checkpoint;
+          this.ossClient.multipartUpload(uploadId, file, {
+          parallel: this.multiPartConfig.parallel,
+          partSize: this.multiPartConfig.partSize,
+          progress: this.multiPartConfig.progress,
+          checkpoint: checkpoint
+        }).then(res => {
+          this.$delete(this.checkpoints, uploadId)
+          this.handleUploadSuccess(file, res.name)
+        }).catch(res => {
+          this.handleUploadError(file, res.name)
+        })
+      });
     }
   }
 };
