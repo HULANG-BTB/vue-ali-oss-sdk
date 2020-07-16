@@ -108,7 +108,7 @@ export default {
       // this.$refs.upload
       console.log(`${checkpoint.file.name} ---> ${progress * 100}`)
       console.log(checkpoint)
-      this.$refs.upload.onProgress(progress * 100, checkpoint.file)
+      this.$refs.upload.handleProgress(progress * 100, checkpoint.file)
     },
     handleUploadStop() {
       if (this.ossClient) {
